@@ -1,6 +1,7 @@
 import { SessionProvider, useSession } from '@/lib/auth-context'
 import { Stack } from 'expo-router'
 import { ActivityIndicator, View } from 'react-native'
+import '../global.css'
 
 function RootNavigator() {
   const { session, isLoading, isRecovering } = useSession()

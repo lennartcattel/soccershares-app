@@ -1,9 +1,12 @@
 import { theme } from '@/constants/theme'
 import { useSession } from '@/lib/auth-context'
 import { supabase } from '@/lib/supabase'
+import { LinearGradient } from 'expo-linear-gradient'
 import { useEffect, useState } from 'react'
 import {
-  ActivityIndicator, RefreshControl,
+  ActivityIndicator,
+  Pressable,
+  RefreshControl,
   Image as RNImage, ScrollView, StyleSheet,
   Text,
   View
@@ -22,6 +25,8 @@ type UserData = {
   display_name: string
   balance: number
   shares_value: number
+  investment_pnl: number
+  prediction_income: number
 }
 
 export default function Home() {
@@ -32,6 +37,7 @@ export default function Home() {
   const [marketUpdated, setMarketUpdated] = useState<string | null>(null)
   const [countries, setCountries] = useState<Country[]>([])
   const [userData, setUserData] = useState<UserData | null>(null)
+  const [showAll, setShowAll] = useState(false)
 
   async function fetchData() {
     try {
@@ -70,10 +76,11 @@ export default function Home() {
       })
 
       setCountries(enriched)
-      setMarketUpdated(new Date().toLocaleString('nl-NL', {
+      const latestUpdate = priceHistory?.[0]?.recorded_at
+      setMarketUpdated(latestUpdate ? new Date(latestUpdate).toLocaleString('nl-NL', {
         day: 'numeric', month: 'short', year: 'numeric',
         hour: '2-digit', minute: '2-digit'
-      }))
+      }) : null)
 
       if (session?.user?.id) {
         const { data: user } = await supabase
@@ -95,10 +102,20 @@ export default function Home() {
           }
         }
 
+        const { data: snapshot } = await supabase
+          .from('recalculation_user_snapshots')
+          .select('investment_pnl, cumulative_prediction_income')
+          .eq('user_id', session.user.id)
+          .order('recalc_timestamp', { ascending: false })
+          .limit(1)
+          .single()
+
         setUserData({
           display_name: user?.display_name ?? '',
           balance: user?.balance ?? 0,
           shares_value: sharesValue,
+          investment_pnl: snapshot?.investment_pnl ?? 0,
+          prediction_income: snapshot?.cumulative_prediction_income ?? 0,
         })
       }
     } catch (e) {
@@ -110,16 +127,16 @@ export default function Home() {
   }
 
   useEffect(() => { fetchData() }, [])
-const top5 = countries.slice(0, 5)
+  const top5 = showAll ? countries : countries.slice(0, 5)
   const topGainers = [...countries].sort((a, b) => b.change_pct - a.change_pct).slice(0, 3)
   const topLosers = [...countries].sort((a, b) => a.change_pct - b.change_pct).slice(0, 3)
 
   const fmt = (n: number) => `€${n.toFixed(2).replace('.', ',')}`
   const fmtPct = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(1).replace('.', ',')}%`
 
-  if (loading) {
+if (loading) {
     return (
-      <View style={styles.center}>
+      <View className="flex-1 items-center justify-center">
         <ActivityIndicator size="large" color={theme.colors.primary} />
       </View>
     )
@@ -130,8 +147,13 @@ const top5 = countries.slice(0, 5)
       style={styles.container}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchData() }} />}
     >
-      {userData && (
-        <View style={styles.banner}>
+{userData && (
+        <LinearGradient
+          colors={['#3a6b1c', '#6baa28']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.banner}
+        >
           <View style={styles.bannerCol}>
             <Text style={styles.bannerLabel}>Total</Text>
             <Text style={styles.bannerValue}>{fmt(userData.balance + userData.shares_value)}</Text>
@@ -140,18 +162,24 @@ const top5 = countries.slice(0, 5)
           <View style={styles.bannerCol}>
             <Text style={styles.bannerLabel}>Shares</Text>
             <Text style={styles.bannerValue}>{fmt(userData.shares_value)}</Text>
+            <Text style={styles.bannerSub}>
+              {fmt(Math.abs(userData.investment_pnl))} {userData.investment_pnl >= 0 ? 'profit' : 'loss'} on shares
+            </Text>
           </View>
           <View style={styles.bannerDivider} />
           <View style={styles.bannerCol}>
             <Text style={styles.bannerLabel}>Cash</Text>
             <Text style={styles.bannerValue}>{fmt(userData.balance)}</Text>
+            <Text style={styles.bannerSub}>
+              €{Math.round(userData.prediction_income)} earned with predictions
+            </Text>
           </View>
-        </View>
+        </LinearGradient>
       )}
 
       <View style={styles.section}>
         <View style={styles.marketRow}>
-          <Text style={styles.sectionTitle}>MARKET STATUS: </Text>
+          <Text style={styles.marketLabel}>MARKET STATUS: </Text>
           <Text style={[styles.marketStatus, { color: marketOpen ? theme.colors.gain : theme.colors.loss }]}>
             {marketOpen ? 'OPEN' : 'CLOSED'}
           </Text>
@@ -179,7 +207,9 @@ const top5 = countries.slice(0, 5)
             </View>
           ))}
         </View>
-        <Text style={styles.showAll}>Show all</Text>
+        <Pressable onPress={() => setShowAll(!showAll)}>
+          <Text style={styles.showAll}>{showAll ? 'Show top 5' : 'Show all'}</Text>
+        </Pressable>
       </View>
 
       <View style={styles.section}>
@@ -230,21 +260,22 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.colors.background },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   banner: {
-    backgroundColor: theme.colors.primary,
     flexDirection: 'row',
     margin: theme.spacing.md,
-    borderRadius: theme.radius.lg,
-    padding: theme.spacing.lg,
+    borderRadius: 12,
+    overflow: 'hidden',
   },
-  bannerCol: { flex: 1, alignItems: 'center' },
-  bannerDivider: { width: 1, backgroundColor: 'rgba(255,255,255,0.3)' },
-  bannerLabel: { color: 'rgba(255,255,255,0.8)', fontSize: 12, marginBottom: 4 },
-  bannerValue: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  bannerCol: { flex: 1, alignItems: 'center', padding: 16 },
+  bannerDivider: { width: 1, height: 40, backgroundColor: 'rgba(255,255,255,0.2)', alignSelf: 'center' },
+  bannerLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginBottom: 4 },
+  bannerValue: { color: '#ffffff', fontSize: 20, fontWeight: '700', marginTop: 4 },
   section: { paddingHorizontal: theme.spacing.md, marginBottom: theme.spacing.md },
   marketRow: { flexDirection: 'row', alignItems: 'center' },
   marketStatus: { fontSize: 14, fontWeight: '700' },
-  marketUpdated: { fontSize: 12, color: theme.colors.textSecondary, marginTop: 2 },
-  sectionTitle: { fontSize: 13, fontWeight: '700', color: theme.colors.text, marginBottom: theme.spacing.sm },
+  marketUpdated: { fontSize: 12, color: '#9ca3af', marginTop: 2 },
+  sectionTitle: { fontSize: 14, fontWeight: '600', color: '#1f2937', marginBottom: theme.spacing.sm, letterSpacing: 0.8, textTransform: 'uppercase' },
+  marketLabel: { fontSize: 14, fontWeight: '600', color: '#1f2937', letterSpacing: 0.8, textTransform: 'uppercase' },
+  bannerSub: { color: 'rgba(255,255,255,0.6)', fontSize: 12, marginTop: 2, textAlign: 'center' },
   card: {
     backgroundColor: theme.colors.surface,
     borderRadius: theme.radius.lg,
@@ -255,20 +286,21 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 1,
   },
-  row: {
+    row: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: theme.spacing.md,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
     gap: theme.spacing.sm,
   },
   rowBorder: { borderBottomWidth: 1, borderBottomColor: theme.colors.border },
   rank: { width: 16, color: theme.colors.textSecondary, fontSize: 14 },
-  flagImg: { width: 28, height: 20, borderRadius: 2 },
+  flagImg: { width: 14, height: 14, borderRadius: 10 },
   countryName: { flex: 1, fontSize: 15, color: theme.colors.text },
   countryNameSm: { flex: 1, fontSize: 13, color: theme.colors.text },
   price: { fontSize: 15, fontWeight: '600', color: theme.colors.text },
   pct: { width: 56, textAlign: 'right', fontSize: 14, fontWeight: '600' },
-  showAll: { color: theme.colors.primary, textAlign: 'center', marginTop: theme.spacing.sm, fontSize: 14 },
+  showAll: { color: '#15803d', textAlign: 'center', marginTop: 6, fontSize: 12 },
   twoCol: { flexDirection: 'row', gap: theme.spacing.sm },
   halfCol: { flex: 1 },
 })  
