@@ -1,15 +1,20 @@
+import Footer from '@/components/Footer'
+import MarketStatus from '@/components/MarketStatus'
+import PortfolioBanner from '@/components/PortfolioBanner'
+import PriceModal, { type ModalCountry } from '@/components/PriceModal'
 import { theme } from '@/constants/theme'
 import { useSession } from '@/lib/auth-context'
 import { supabase } from '@/lib/supabase'
-import { LinearGradient } from 'expo-linear-gradient'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { useFocusEffect } from 'expo-router'
+import { FlagImage } from '@/components/FlagImage'
 import {
   ActivityIndicator,
   Pressable,
   RefreshControl,
-  Image as RNImage, ScrollView, StyleSheet,
+  ScrollView,
   Text,
-  View
+  View,
 } from 'react-native'
 
 type Country = {
@@ -17,16 +22,34 @@ type Country = {
   name: string
   code: string
   flag_emoji: string
+  group_name: string
   current_price: number
   change_pct: number
 }
 
 type UserData = {
-  display_name: string
   balance: number
   shares_value: number
   investment_pnl: number
   prediction_income: number
+}
+
+type UpcomingMatch = {
+  id: string
+  match_date: string
+  stage: string
+  home_country_id: string | null
+  away_country_id: string | null
+  bracket_label: string | null
+}
+
+const STAGE_ABBR: Record<string, string> = {
+  round_of_32: 'R32', round_of_16: 'R16', quarterfinal: 'QF',
+  semifinal: 'SF', third_place: '3rd', final: 'F',
+}
+const KNOCKOUT_NEXT: Record<string, string> = {
+  round_of_32: 'round_of_16', round_of_16: 'quarterfinal',
+  quarterfinal: 'semifinal', semifinal: 'final', final: 'winner',
 }
 
 export default function Home() {
@@ -38,18 +61,20 @@ export default function Home() {
   const [countries, setCountries] = useState<Country[]>([])
   const [userData, setUserData] = useState<UserData | null>(null)
   const [showAll, setShowAll] = useState(false)
+  const [upcomingMatches, setUpcomingMatches] = useState<UpcomingMatch[]>([])
+  const [matchPredictions, setMatchPredictions] = useState<Record<string, string | null>>({})
+  const [advancementPredictions, setAdvancementPredictions] = useState<Record<string, Set<string>>>({})
+  const [holdingsMap, setHoldingsMap] = useState<Record<string, number>>({})
+  const [modalCountry, setModalCountry] = useState<ModalCountry | null>(null)
 
   async function fetchData() {
     try {
-      const { data: windows } = await supabase
-        .from('active_trading_window')
-        .select('closes_at')
-        .limit(1)
+      const { data: windows } = await supabase.from('active_trading_window').select('*').limit(1)
       setMarketOpen((windows?.length ?? 0) > 0)
 
       const { data: countriesData } = await supabase
         .from('countries')
-        .select('id, name, code, flag_emoji, current_price')
+        .select('id, name, code, flag_emoji, group_name, current_price')
         .order('current_price', { ascending: false })
 
       const { data: priceHistory } = await supabase
@@ -59,64 +84,94 @@ export default function Home() {
 
       const prevPriceMap: Record<string, number> = {}
       const seenOnce = new Set<string>()
-      if (priceHistory) {
-        for (const row of priceHistory) {
-          if (!seenOnce.has(row.country_id)) {
-            seenOnce.add(row.country_id)
-          } else if (!prevPriceMap[row.country_id]) {
-            prevPriceMap[row.country_id] = row.price
-          }
+      for (const row of priceHistory ?? []) {
+        if (!seenOnce.has(row.country_id)) {
+          seenOnce.add(row.country_id)
+        } else if (!prevPriceMap[row.country_id]) {
+          prevPriceMap[row.country_id] = row.price
         }
       }
 
-      const enriched: Country[] = (countriesData ?? []).map((c) => {
+      const enriched: Country[] = (countriesData ?? []).map(c => {
         const prev = prevPriceMap[c.id] ?? 0
-        const change_pct = prev > 0 ? (c.current_price - prev) / prev * 100 : 0
-        return { ...c, change_pct }
+        return { ...c, change_pct: prev > 0 ? (c.current_price - prev) / prev * 100 : 0 }
       })
-
       setCountries(enriched)
+
       const latestUpdate = priceHistory?.[0]?.recorded_at
       setMarketUpdated(latestUpdate ? new Date(latestUpdate).toLocaleString('nl-NL', {
-        day: 'numeric', month: 'short', year: 'numeric',
-        hour: '2-digit', minute: '2-digit'
+        day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
       }) : null)
 
+      // Upcoming matches
+      const { data: lastRecalc } = await supabase
+        .from('recalculations')
+        .select('recalc_timestamp')
+        .order('recalc_timestamp', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      const since = (lastRecalc as any)?.recalc_timestamp ?? new Date().toISOString()
+
+      const { data: matchesData } = await supabase
+        .from('matches')
+        .select('id, bracket_label, stage, match_date, home_country_id, away_country_id')
+        .not('home_country_id', 'is', null)
+        .not('away_country_id', 'is', null)
+        .gte('match_date', since)
+        .order('match_date', { ascending: true })
+        .limit(8)
+      setUpcomingMatches((matchesData ?? []) as UpcomingMatch[])
+
       if (session?.user?.id) {
-        const { data: user } = await supabase
-          .from('users')
-          .select('display_name, balance')
-          .eq('id', session.user.id)
-          .single()
+        const [userResult, holdingsResult, transactionsResult, snapshotResult] = await Promise.all([
+          supabase.from('users').select('balance').eq('id', session.user.id).single(),
+          supabase.from('holdings').select('country_id, shares').eq('user_id', session.user.id),
+          supabase.from('transactions').select('type, total_amount').eq('user_id', session.user.id),
+          supabase
+            .from('recalculation_user_snapshots')
+            .select('cumulative_prediction_income')
+            .eq('user_id', session.user.id)
+            .order('recalc_timestamp', { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+        ])
 
-        const { data: holdings } = await supabase
-          .from('holdings')
-          .select('shares, country_id')
-          .eq('user_id', session.user.id)
-
+        const holdMap: Record<string, number> = {}
         let sharesValue = 0
-        if (holdings && countriesData) {
-          for (const h of holdings) {
-            const country = countriesData.find(c => c.id === h.country_id)
-            if (country) sharesValue += h.shares * country.current_price
-          }
+        for (const h of holdingsResult.data ?? []) {
+          holdMap[h.country_id] = h.shares
+          const c = (countriesData ?? []).find(c => c.id === h.country_id)
+          if (c) sharesValue += h.shares * c.current_price
         }
+        setHoldingsMap(holdMap)
 
-        const { data: snapshot } = await supabase
-          .from('recalculation_user_snapshots')
-          .select('investment_pnl, cumulative_prediction_income')
-          .eq('user_id', session.user.id)
-          .order('recalc_timestamp', { ascending: false })
-          .limit(1)
-          .single()
+        const txRows = (transactionsResult.data ?? []) as Array<{ type: string; total_amount: number }>
+        const netInvested = txRows.reduce(
+          (sum, t) => sum + (t.type === 'buy' ? Number(t.total_amount) : -Number(t.total_amount)), 0
+        )
 
         setUserData({
-          display_name: user?.display_name ?? '',
-          balance: user?.balance ?? 0,
+          balance: userResult.data?.balance ?? 0,
           shares_value: sharesValue,
-          investment_pnl: snapshot?.investment_pnl ?? 0,
-          prediction_income: snapshot?.cumulative_prediction_income ?? 0,
+          investment_pnl: sharesValue - netInvested,
+          prediction_income: snapshotResult.data?.cumulative_prediction_income ?? 0,
         })
+
+        const [{ data: matchPreds }, { data: advPreds }] = await Promise.all([
+          supabase.from('match_predictions').select('match_id, predicted_winner_id').eq('user_id', session.user.id),
+          supabase.from('advancement_predictions').select('country_id, stage').eq('user_id', session.user.id),
+        ])
+
+        const predMap: Record<string, string | null> = {}
+        for (const p of matchPreds ?? []) predMap[p.match_id] = p.predicted_winner_id
+        setMatchPredictions(predMap)
+
+        const advMap: Record<string, Set<string>> = {}
+        for (const p of advPreds ?? []) {
+          if (!advMap[p.country_id]) advMap[p.country_id] = new Set()
+          advMap[p.country_id].add(p.stage)
+        }
+        setAdvancementPredictions(advMap)
       }
     } catch (e) {
       console.error('Home fetch error', e)
@@ -126,15 +181,18 @@ export default function Home() {
     }
   }
 
-  useEffect(() => { fetchData() }, [])
-  const top5 = showAll ? countries : countries.slice(0, 5)
+  useFocusEffect(useCallback(() => { fetchData() }, [session]))
+
+  const countryMap = Object.fromEntries(countries.map(c => [c.id, c]))
+  const displayed = showAll ? countries : countries.slice(0, 5)
   const topGainers = [...countries].sort((a, b) => b.change_pct - a.change_pct).slice(0, 3)
   const topLosers = [...countries].sort((a, b) => a.change_pct - b.change_pct).slice(0, 3)
+  const fmt = (n: number) => n.toFixed(2).replace('.', ',')
+  const fmtPct = (n: number) => `${n > 0 ? '+' : ''}${n.toFixed(1).replace('.', ',')}%`
+  const pctColor = (n: number) => n === 0 ? '#9ca3af' : n > 0 ? '#16a34a' : '#dc2626'
+  const openModal = (c: Country) => setModalCountry({ id: c.id, name: c.name, code: c.code, current_price: c.current_price })
 
-  const fmt = (n: number) => `€${n.toFixed(2).replace('.', ',')}`
-  const fmtPct = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(1).replace('.', ',')}%`
-
-if (loading) {
+  if (loading) {
     return (
       <View className="flex-1 items-center justify-center">
         <ActivityIndicator size="large" color={theme.colors.primary} />
@@ -143,164 +201,187 @@ if (loading) {
   }
 
   return (
-    <ScrollView
-      style={styles.container}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchData() }} />}
-    >
-{userData && (
-        <LinearGradient
-          colors={['#3a6b1c', '#6baa28']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={styles.banner}
-        >
-          <View style={styles.bannerCol}>
-            <Text style={styles.bannerLabel}>Total</Text>
-            <Text style={styles.bannerValue}>{fmt(userData.balance + userData.shares_value)}</Text>
-          </View>
-          <View style={styles.bannerDivider} />
-          <View style={styles.bannerCol}>
-            <Text style={styles.bannerLabel}>Shares</Text>
-            <Text style={styles.bannerValue}>{fmt(userData.shares_value)}</Text>
-            <Text style={styles.bannerSub}>
-              {fmt(Math.abs(userData.investment_pnl))} {userData.investment_pnl >= 0 ? 'profit' : 'loss'} on shares
-            </Text>
-          </View>
-          <View style={styles.bannerDivider} />
-          <View style={styles.bannerCol}>
-            <Text style={styles.bannerLabel}>Cash</Text>
-            <Text style={styles.bannerValue}>{fmt(userData.balance)}</Text>
-            <Text style={styles.bannerSub}>
-              €{Math.round(userData.prediction_income)} earned with predictions
-            </Text>
-          </View>
-        </LinearGradient>
-      )}
+    <>
+      <ScrollView
+        className="flex-1 bg-gray-50"
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); fetchData() }} />}
+      >
+        <View className="flex flex-col gap-4 p-4">
+          {userData && (
+            <PortfolioBanner
+              total={userData.balance + userData.shares_value}
+              sharesValue={userData.shares_value}
+              balance={userData.balance}
+              investmentPnl={userData.investment_pnl}
+              predictionIncome={userData.prediction_income}
+              showSubtitles={true}
+            />
+          )}
 
-      <View style={styles.section}>
-        <View style={styles.marketRow}>
-          <Text style={styles.marketLabel}>MARKET STATUS: </Text>
-          <Text style={[styles.marketStatus, { color: marketOpen ? theme.colors.gain : theme.colors.loss }]}>
-            {marketOpen ? 'OPEN' : 'CLOSED'}
-          </Text>
-        </View>
-        {marketUpdated && (
-          <Text style={styles.marketUpdated}>Last update: {marketUpdated}</Text>
-        )}
-      </View>
+          <MarketStatus marketOpen={marketOpen} lastUpdated={marketUpdated} />
 
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>TOP 5</Text>
-        <View style={styles.card}>
-          {top5.map((c, i) => (
-            <View key={c.id} style={[styles.row, i < top5.length - 1 && styles.rowBorder]}>
-              <Text style={styles.rank}>{i + 1}</Text>
-              <RNImage
-                source={{ uri: `https://www.soccershares.nl/flags/${c.code.toLowerCase().trim()}.svg` }}
-                style={styles.flagImg}
-              />
-              <Text style={styles.countryName}>{c.name}</Text>
-              <Text style={styles.price}>{fmt(c.current_price)}</Text>
-              <Text style={[styles.pct, { color: c.change_pct >= 0 ? theme.colors.gain : theme.colors.loss }]}>
-                {fmtPct(c.change_pct)}
-              </Text>
-            </View>
-          ))}
-        </View>
-        <Pressable onPress={() => setShowAll(!showAll)}>
-          <Text style={styles.showAll}>{showAll ? 'Show top 5' : 'Show all'}</Text>
-        </Pressable>
-      </View>
-
-      <View style={styles.section}>
-        <View style={styles.twoCol}>
-          <View style={styles.halfCol}>
-            <Text style={styles.sectionTitle}>TOP GAINERS</Text>
-            <View style={styles.card}>
-              {topGainers.map((c, i) => (
-                <View key={c.id} style={[styles.row, i < topGainers.length - 1 && styles.rowBorder]}>
-                  <RNImage
-                    source={{ uri: `https://www.soccershares.nl/flags/${c.code.toLowerCase().trim()}.svg` }}
-                    style={styles.flagImg}
-                  />
-                  <Text style={styles.countryNameSm}>{c.name}</Text>
-                  <Text style={[styles.pct, { color: theme.colors.gain }]}>
+          {/* Top 5 */}
+          <View className="flex flex-col gap-2">
+            <Text className="text-sm font-semibold uppercase tracking-wide text-gray-700">Top 5</Text>
+            <View className="overflow-hidden rounded-xl border border-gray-100 bg-white shadow-sm">
+              {displayed.map((c, i) => (
+                <Pressable
+                  key={c.id}
+                  onPress={() => openModal(c)}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 8,
+                    paddingVertical: 12, paddingHorizontal: 16,
+                    borderBottomWidth: i < displayed.length - 1 ? 1 : 0, borderBottomColor: '#f3f4f6',
+                  }}
+                >
+                  <Text style={{ width: 24, fontSize: 10, fontWeight: '600', color: '#9ca3af' }}>{i + 1}</Text>
+                  <FlagImage code={c.code} size={14} radius={2} />
+                  <Text style={{ flex: 1, fontSize: 12, fontWeight: '500', color: '#1f2937' }} numberOfLines={1}>{c.name}</Text>
+                  <Text style={{ width: 60, textAlign: 'right', fontSize: 12, fontWeight: '500', color: '#1f2937' }}>{fmt(c.current_price)}</Text>
+                  <Text style={{ width: 68, textAlign: 'right', fontSize: 11, fontWeight: '500', color: pctColor(c.change_pct) }}>
                     {fmtPct(c.change_pct)}
                   </Text>
-                </View>
+                </Pressable>
               ))}
             </View>
+            <Pressable onPress={() => setShowAll(v => !v)}>
+              <Text className="text-center text-xs text-green-700">{showAll ? 'Show top 5' : 'Show all'}</Text>
+            </Pressable>
           </View>
-          <View style={styles.halfCol}>
-            <Text style={styles.sectionTitle}>TOP LOSERS</Text>
-            <View style={styles.card}>
-              {topLosers.map((c, i) => (
-                <View key={c.id} style={[styles.row, i < topLosers.length - 1 && styles.rowBorder]}>
-                  <RNImage
-                    source={{ uri: `https://www.soccershares.nl/flags/${c.code.toLowerCase().trim()}.svg` }}
-                    style={styles.flagImg}
-                  />
-                  <Text style={styles.countryNameSm}>{c.name}</Text>
-                  <Text style={[styles.pct, { color: theme.colors.loss }]}>
-                    {fmtPct(c.change_pct)}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          </View>
-        </View>
-      </View>
 
-      <View style={{ height: 32 }} />
-    </ScrollView>
+          {/* Gainers + Losers */}
+          <View className="flex-row gap-2">
+            <View className="flex-1 flex-col gap-2">
+              <Text className="text-sm font-semibold uppercase tracking-wide text-gray-700">Top Gainers</Text>
+              <View className="overflow-hidden rounded-xl border border-gray-100 bg-white shadow-sm">
+                {topGainers.map((c, i) => (
+                  <Pressable
+                    key={c.id}
+                    onPress={() => openModal(c)}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center', gap: 8,
+                      paddingVertical: 10, paddingHorizontal: 12,
+                      borderBottomWidth: i < topGainers.length - 1 ? 1 : 0, borderBottomColor: '#f3f4f6',
+                    }}
+                  >
+                    <FlagImage code={c.code} size={14} radius={2} />
+                    <Text style={{ flex: 1, fontSize: 12, fontWeight: '500', color: '#1f2937' }} numberOfLines={1}>{c.name}</Text>
+                    <Text style={{ fontSize: 11, fontWeight: '500', color: pctColor(c.change_pct) }}>{fmtPct(c.change_pct)}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+            <View className="flex-1 flex-col gap-2">
+              <Text className="text-sm font-semibold uppercase tracking-wide text-gray-700">Top Losers</Text>
+              <View className="overflow-hidden rounded-xl border border-gray-100 bg-white shadow-sm">
+                {topLosers.map((c, i) => (
+                  <Pressable
+                    key={c.id}
+                    onPress={() => openModal(c)}
+                    style={{
+                      flexDirection: 'row', alignItems: 'center', gap: 8,
+                      paddingVertical: 10, paddingHorizontal: 12,
+                      borderBottomWidth: i < topLosers.length - 1 ? 1 : 0, borderBottomColor: '#f3f4f6',
+                    }}
+                  >
+                    <FlagImage code={c.code} size={14} radius={2} />
+                    <Text style={{ flex: 1, fontSize: 12, fontWeight: '500', color: '#1f2937' }} numberOfLines={1}>{c.name}</Text>
+                    <Text style={{ fontSize: 11, fontWeight: '500', color: pctColor(c.change_pct) }}>{fmtPct(c.change_pct)}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          </View>
+
+          {/* Upcoming Matches */}
+          {upcomingMatches.length > 0 && (
+            <View className="flex flex-col gap-2">
+              <Text className="text-sm font-semibold uppercase tracking-wide text-gray-700">Upcoming Matches</Text>
+              <View className="overflow-hidden rounded-xl border border-gray-100 bg-white shadow-sm">
+                {upcomingMatches.map((m, mi) => {
+                  const home = m.home_country_id ? countryMap[m.home_country_id] : null
+                  const away = m.away_country_id ? countryMap[m.away_country_id] : null
+                  const isKnockout = m.stage !== 'group'
+                  const hasPred = m.id in matchPredictions
+                  const predWinnerId = matchPredictions[m.id]
+
+                  let predLabel: string | null = null
+                  if (isKnockout) {
+                    const nextStage = KNOCKOUT_NEXT[m.stage] ?? m.stage
+                    const homePred = m.home_country_id ? advancementPredictions[m.home_country_id]?.has(nextStage) : false
+                    const awayPred = m.away_country_id ? advancementPredictions[m.away_country_id]?.has(nextStage) : false
+                    if (homePred && awayPred) predLabel = `${home?.name ?? '?'} & ${away?.name ?? '?'} to advance`
+                    else if (homePred) predLabel = `${home?.name ?? '?'} to advance`
+                    else if (awayPred) predLabel = `${away?.name ?? '?'} to advance`
+                    else predLabel = 'none to advance'
+                  } else if (hasPred) {
+                    predLabel = predWinnerId === null ? 'Draw'
+                      : predWinnerId === m.home_country_id ? `${home?.name ?? '?'} wins`
+                      : `${away?.name ?? '?'} wins`
+                  }
+
+                  const homeShares = m.home_country_id ? (holdingsMap[m.home_country_id] ?? 0) : 0
+                  const awayShares = m.away_country_id ? (holdingsMap[m.away_country_id] ?? 0) : 0
+                  const sharesLabel = [
+                    homeShares > 0 ? `${homeShares}× ${home?.name ?? ''}` : null,
+                    awayShares > 0 ? `${awayShares}× ${away?.name ?? ''}` : null,
+                  ].filter(Boolean).join(' · ')
+
+                  const d = new Date(m.match_date)
+                  const dateStr = d.toLocaleDateString('en-GB', { weekday: 'short', month: 'short', day: 'numeric' })
+                  const timeStr = d.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })
+
+                  return (
+                    <View key={m.id} style={{ paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: mi < upcomingMatches.length - 1 ? 1.5 : 0, borderBottomColor: '#f3f4f6' }}>
+                      {/* Stage + date/time */}
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                        {!isKnockout && home?.group_name ? (
+                          <View style={{ backgroundColor: '#f3f4f6', borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 }}>
+                            <Text style={{ fontSize: 11, fontWeight: '600', color: '#6b7280' }}>{home.group_name}</Text>
+                          </View>
+                        ) : isKnockout ? (
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: '#6b7280' }}>{STAGE_ABBR[m.stage] ?? m.stage}</Text>
+                        ) : null}
+                        <Text style={{ fontSize: 11, fontWeight: '500', color: '#374151' }}>{dateStr}</Text>
+                        <Text style={{ fontSize: 11, fontWeight: '500', color: '#374151' }}>{timeStr}</Text>
+                      </View>
+
+                      {/* Teams — 3-column: home right-aligned | vs | away left-aligned */}
+                      {isKnockout && !home && m.bracket_label ? (
+                        <Text style={{ fontSize: 12, fontWeight: '500', color: '#1f2937' }}>{m.bracket_label}</Text>
+                      ) : (
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
+                            <Text style={{ flexShrink: 1, fontSize: 12, fontWeight: '500', color: '#1f2937' }} numberOfLines={1}>{home?.name ?? '—'}</Text>
+                            {home && <FlagImage code={home.code} size={13} radius={2} />}
+                          </View>
+                          <Text style={{ fontSize: 11, fontWeight: '600', color: '#9ca3af', width: 20, textAlign: 'center' }}>vs</Text>
+                          <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            {away && <FlagImage code={away.code} size={13} radius={2} />}
+                            <Text style={{ flexShrink: 1, fontSize: 12, fontWeight: '500', color: '#1f2937' }} numberOfLines={1}>{away?.name ?? '—'}</Text>
+                          </View>
+                        </View>
+                      )}
+
+                      {/* Prediction + shares */}
+                      {session?.user && (
+                        <Text style={{ fontSize: 11, color: '#9ca3af', textAlign: 'center', marginTop: 8 }}>
+                          {predLabel !== null ? `My prediction: ${predLabel}` : 'My prediction: none yet'}
+                          {sharesLabel ? ` / My shares: ${sharesLabel}` : ''}
+                        </Text>
+                      )}
+                    </View>
+                  )
+                })}
+              </View>
+            </View>
+          )}
+
+          <Footer />
+        </View>
+      </ScrollView>
+
+      <PriceModal country={modalCountry} onClose={() => setModalCountry(null)} />
+    </>
   )
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: theme.colors.background },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  banner: {
-    flexDirection: 'row',
-    margin: theme.spacing.md,
-    borderRadius: 12,
-    overflow: 'hidden',
-  },
-  bannerCol: { flex: 1, alignItems: 'center', padding: 16 },
-  bannerDivider: { width: 1, height: 40, backgroundColor: 'rgba(255,255,255,0.2)', alignSelf: 'center' },
-  bannerLabel: { color: 'rgba(255,255,255,0.7)', fontSize: 12, marginBottom: 4 },
-  bannerValue: { color: '#ffffff', fontSize: 20, fontWeight: '700', marginTop: 4 },
-  section: { paddingHorizontal: theme.spacing.md, marginBottom: theme.spacing.md },
-  marketRow: { flexDirection: 'row', alignItems: 'center' },
-  marketStatus: { fontSize: 14, fontWeight: '700' },
-  marketUpdated: { fontSize: 12, color: '#9ca3af', marginTop: 2 },
-  sectionTitle: { fontSize: 14, fontWeight: '600', color: '#1f2937', marginBottom: theme.spacing.sm, letterSpacing: 0.8, textTransform: 'uppercase' },
-  marketLabel: { fontSize: 14, fontWeight: '600', color: '#1f2937', letterSpacing: 0.8, textTransform: 'uppercase' },
-  bannerSub: { color: 'rgba(255,255,255,0.6)', fontSize: 12, marginTop: 2, textAlign: 'center' },
-  card: {
-    backgroundColor: theme.colors.surface,
-    borderRadius: theme.radius.lg,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 4,
-    elevation: 1,
-  },
-    row: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    gap: theme.spacing.sm,
-  },
-  rowBorder: { borderBottomWidth: 1, borderBottomColor: theme.colors.border },
-  rank: { width: 16, color: theme.colors.textSecondary, fontSize: 14 },
-  flagImg: { width: 14, height: 14, borderRadius: 10 },
-  countryName: { flex: 1, fontSize: 15, color: theme.colors.text },
-  countryNameSm: { flex: 1, fontSize: 13, color: theme.colors.text },
-  price: { fontSize: 15, fontWeight: '600', color: theme.colors.text },
-  pct: { width: 56, textAlign: 'right', fontSize: 14, fontWeight: '600' },
-  showAll: { color: '#15803d', textAlign: 'center', marginTop: 6, fontSize: 12 },
-  twoCol: { flexDirection: 'row', gap: theme.spacing.sm },
-  halfCol: { flex: 1 },
-})  

@@ -1,15 +1,17 @@
 {
   "expo": {
-    "name": "soccershares-app",
+    "name": "SoccerShares",
     "slug": "soccershares-app",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "soccershares",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "light",
     "ios": {
-      "icon": "./assets/expo.icon",
-      "bundleIdentifier": "nl.soccershares.app"
+      "bundleIdentifier": "nl.soccershares.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "nl.soccershares.app",
@@ -37,11 +39,13 @@
           }
         }
       ],
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-font",
+      "expo-web-browser",
+      ["expo-notifications", { "iosDisplayInForeground": true, "mode": "production" }]
     ],
     "experiments": {
-      "typedRoutes": true,
-      "reactCompiler": true
+      "typedRoutes": true
     },
     "extra": {
       "router": {},
@@ -49,6 +53,12 @@
         "projectId": "fe4b4f26-8872-4412-88e2-c5474154a408"
       }
     },
-    "owner": "soccershares"
+    "owner": "lcattel",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/fe4b4f26-8872-4412-88e2-c5474154a408"
+    }
   }
 }

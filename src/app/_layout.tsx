@@ -1,7 +1,10 @@
 import { SessionProvider, useSession } from '@/lib/auth-context'
 import { Stack } from 'expo-router'
 import { ActivityIndicator, View } from 'react-native'
+import { enableScreens } from 'react-native-screens'
 import '../global.css'
+
+enableScreens(false)
 
 function RootNavigator() {
   const { session, isLoading, isRecovering } = useSession()

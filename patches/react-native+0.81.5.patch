@@ -1,0 +1,67 @@
+diff --git a/node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios/ReactCommon/RCTTurboModule.mm b/node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios/ReactCommon/RCTTurboModule.mm
+index 2a67797..ba16569 100644
+--- a/node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios/ReactCommon/RCTTurboModule.mm
++++ b/node_modules/react-native/ReactCommon/react/nativemodule/core/platform/ios/ReactCommon/RCTTurboModule.mm
+@@ -363,18 +363,26 @@ id ObjCTurboModule::performMethodInvocation(
+       TurboModulePerfLogger::asyncMethodCallExecutionStart(moduleName, methodName, asyncCallCounter);
+     }
+
++    // iOS 26 compat: throwing C++ inside @catch triggers objc_exception_rethrow → terminate.
++    // Capture the exception, exit @catch cleanly, then throw outside. @finally also removed
++    // to avoid ObjC/C++ interop issues on iOS 26. See facebook/react-native#54859
++    NSException *capturedSyncException = nil;
+     @try {
+       [inv invokeWithTarget:strongModule];
+     } @catch (NSException *exception) {
+       if (isSync) {
+-        // We can only convert NSException to JSError in sync method calls.
+-        // See https://github.com/reactwg/react-native-new-architecture/discussions/276#discussioncomment-12567155
+-        throw convertNSExceptionToJSError(runtime, exception, std::string{moduleName}, methodNameStr);
++        capturedSyncException = exception;
+       } else {
+-        @throw exception;
++        NSString *info = [NSString stringWithFormat:@"%s.%s threw NSException (async): %@ — %@",
++                          moduleName, methodName, exception.name, exception.reason];
++        NSLog(@"[RCTTurboModule] iOS-26-compat async: %@", info);
++        [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"__rctvm_async_exception"];
++        [[NSUserDefaults standardUserDefaults] synchronize];
+       }
+-    } @finally {
+-      [retainedObjectsForInvocation removeAllObjects];
++    }
++    [retainedObjectsForInvocation removeAllObjects];
++    if (capturedSyncException) {
++      throw convertNSExceptionToJSError(runtime, capturedSyncException, std::string{moduleName}, methodNameStr);
+     }
+
+     if (!isSync) {
+@@ -432,12 +440,26 @@ void ObjCTurboModule::performVoidMethodInvocation(
+       TurboModulePerfLogger::asyncMethodCallExecutionStart(moduleName, methodName, asyncCallCounter);
+     }
+
++    // iOS 26 compat: throwing C++ inside @catch triggers objc_exception_rethrow → terminate.
++    // Capture the exception, exit @catch cleanly, then throw outside. @finally also removed
++    // to avoid ObjC/C++ interop issues on iOS 26. See facebook/react-native#54859, expo/expo#44606
++    NSException *capturedVoidSyncException = nil;
+     @try {
+       [inv invokeWithTarget:strongModule];
+     } @catch (NSException *exception) {
+-      throw convertNSExceptionToJSError(runtime, exception, std::string{moduleName}, methodNameStr);
+-    } @finally {
+-      [retainedObjectsForInvocation removeAllObjects];
++      if (shouldVoidMethodsExecuteSync_) {
++        capturedVoidSyncException = exception;
++      } else {
++        NSString *info = [NSString stringWithFormat:@"%s.%s threw NSException (async void): %@ — %@",
++                          moduleName, methodName, exception.name, exception.reason];
++        NSLog(@"[RCTTurboModule] iOS-26-compat void: %@", info);
++        [[NSUserDefaults standardUserDefaults] setObject:info forKey:@"__rctvm_void_exception"];
++        [[NSUserDefaults standardUserDefaults] synchronize];
++      }
++    }
++    [retainedObjectsForInvocation removeAllObjects];
++    if (capturedVoidSyncException) {
++      throw convertNSExceptionToJSError(runtime, capturedVoidSyncException, std::string{moduleName}, methodNameStr);
+     }
+
+     if (shouldVoidMethodsExecuteSync_) {

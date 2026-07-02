@@ -4,6 +4,7 @@ import {
     createContext, useContext, useEffect, useState, type PropsWithChildren,
 } from 'react'
 import { supabase } from './supabase'
+import { clearPushToken, registerPushToken } from './push-notifications'
 
 type AuthState = {
   session: Session | null
@@ -34,6 +35,9 @@ export function SessionProvider({ children }: PropsWithChildren) {
     const { data: sub } = supabase.auth.onAuthStateChange((event, next) => {
       setSession(next)
       if (event === 'PASSWORD_RECOVERY') setIsRecovering(true)
+      if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && next?.user?.id) {
+        registerPushToken(next.user.id)
+      }
     })
     return () => sub.subscription.unsubscribe()
   }, [])
@@ -76,7 +80,10 @@ export function SessionProvider({ children }: PropsWithChildren) {
         session,
         isLoading,
         isRecovering,
-        signOut: async () => { await supabase.auth.signOut() },
+        signOut: async () => {
+          await clearPushToken(session?.user?.id)
+          await supabase.auth.signOut()
+        },
         clearRecovery: () => setIsRecovering(false),
       }}
     >
